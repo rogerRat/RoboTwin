@@ -15,21 +15,14 @@ def extract_placeholders(instruction: str) -> List[str]:
     placeholders = re.findall(r"{([^}]+)}", instruction)
     return placeholders
 
-def filter_instructions(instructions: List[str], episode_params: Dict[str, str], rng=None) -> List[str]:
+def filter_instructions(instructions: List[str], episode_params: Dict[str, str]) -> List[str]:
     """
     Filter instructions to only include those that have all placeholders
     matching the available episode parameters. No more, no less.
     Also accept instructions that don't contain arm placeholder {[a-z]}.
-
-    ``rng`` is the ``random.Random`` instance to shuffle with, defaulting to the
-    global ``random`` module. The list is copied rather than shuffled in place:
-    callers reuse one template list across episodes, and shuffling it in place
-    makes an episode's ordering depend on the episodes processed before it.
     """
-    rng = random if rng is None else rng
     filtered_instructions = []
-    instructions = list(instructions)
-    rng.shuffle(instructions)
+    random.shuffle(instructions)
 
     for instruction in instructions:
         placeholders = extract_placeholders(instruction)
@@ -50,13 +43,12 @@ def filter_instructions(instructions: List[str], episode_params: Dict[str, str],
     return filtered_instructions
 
 
-def replace_placeholders(instruction: str, episode_params: Dict[str, str], rng=None) -> str:
+def replace_placeholders(instruction: str, episode_params: Dict[str, str]) -> str:
     """Replace all {X} placeholders in the instruction with corresponding values from episode_params.
     For arm placeholders {[a-z]}, add 'the ' in front and ' arm' after the value.
     If the value is a path to an existing JSON file, randomly choose one 'description' item and prepend 'the'.
     If the value contains '\' or '/' but the file does not exist, print a bold warning.
     """
-    rng = random if rng is None else rng
     # Remove {} from episode_params keys for replacement
     stripped_episode_params = {key.strip("{}"): value for key, value in episode_params.items()}
 
@@ -78,7 +70,7 @@ def replace_placeholders(instruction: str, episode_params: Dict[str, str], rng=N
             with open(json_path, "r") as f:
                 json_data = json.load(f)
             # Randomly choose one description and prepend 'the'
-            description = rng.choice(json_data.get("seen", []))
+            description = random.choice(json_data.get("seen", []))
             value = f"the {description}"
         # Check if the key is a single lowercase letter (arm placeholder)
         elif len(key) == 1 and "a" <= key <= "z":
@@ -91,13 +83,12 @@ def replace_placeholders(instruction: str, episode_params: Dict[str, str], rng=N
     return instruction
 
 
-def replace_placeholders_unseen(instruction: str, episode_params: Dict[str, str], rng=None) -> str:
+def replace_placeholders_unseen(instruction: str, episode_params: Dict[str, str]) -> str:
     """Similar to replace_placeholders but uses 'unseen' descriptions from JSON files.
     For arm placeholders {[a-z]}, add 'the ' in front and ' arm' after the value.
     If the value is a path to an existing JSON file, randomly choose one 'unseen' description and prepend 'the'.
     If the value contains '\' or '/' but the file does not exist, print a bold warning.
     """
-    rng = random if rng is None else rng
     # Remove {} from episode_params keys for replacement
     stripped_episode_params = {key.strip("{}"): value for key, value in episode_params.items()}
 
@@ -120,11 +111,11 @@ def replace_placeholders_unseen(instruction: str, episode_params: Dict[str, str]
                 json_data = json.load(f)
             # Randomly choose one unseen description and prepend 'the'
             if "unseen" in json_data and json_data["unseen"]:
-                description = rng.choice(json_data.get("unseen", []))
+                description = random.choice(json_data.get("unseen", []))
                 value = f"the {description}"
             else:
                 # Fall back to seen descriptions if unseen is empty
-                description = rng.choice(json_data.get("seen", []))
+                description = random.choice(json_data.get("seen", []))
                 value = f"the {description}"
         # Check if the key is a single lowercase letter (arm placeholder)
         elif len(key) == 1 and "a" <= key <= "z":
@@ -137,9 +128,40 @@ def replace_placeholders_unseen(instruction: str, episode_params: Dict[str, str]
     return instruction
 
 
+def resolve_task_instruction_path(task_name: str) -> str:
+    """Path to the existing task instruction JSON, preferring task_instruction/left/.
+
+    Left-arm task instructions live in ``task_instruction/left/``; original
+    ones stay in ``task_instruction/``.  The bare task name is resolved against
+    both so the CLI argument is unchanged.
+    """
+    for sub in ("task_instruction/left", "task_instruction"):
+        p = os.path.join(parent_directory, f"../{sub}/{task_name}.json")
+        if os.path.exists(p):
+            return p
+    return os.path.join(parent_directory, f"../task_instruction/{task_name}.json")
+
+
+def resolve_setting_path(setting: str) -> str:
+    """Path to the existing task config yml, preferring task_config/left/.
+
+    Left-arm configs are organized like envs/left — one subfolder per camera
+    variant, base/ holds the default central-cam configs.  Keep the folder
+    list in sync with envs/_GLOBAL_CONFIGS.py task_config_yml_path.
+    """
+    for folder in ("cen_arm_right_wide_cam", "cen_arm_near_side_cam",
+                   "cen_arm_side_cam", "cen_arm_front_cam", "cen_arm_top_cam",
+                   "central_wide_cam", "left_oppo_cam",
+                   "base", ""):
+        p = os.path.join(parent_directory, f"../../task_config/left/{folder + '/' if folder else ''}{setting}.yml")
+        if os.path.exists(p):
+            return p
+    return os.path.join(parent_directory, f"../../task_config/{setting}.yml")
+
+
 def load_task_instructions(task_name: str) -> Dict[str, Any]:
     """Load the task instructions from the JSON file."""
-    file_path = os.path.join(parent_directory, f"../task_instruction/{task_name}.json")
+    file_path = resolve_task_instruction_path(task_name)
     with open(file_path, "r") as f:
         task_data = json.load(f)
     return task_data
@@ -190,37 +212,12 @@ def save_episode_descriptions(task_name: str, setting: str, generated_descriptio
                 indent=2,
             )
 
-def episode_rng(seed, episode_index: int) -> random.Random:
-    """The RNG used to generate one episode's descriptions.
-
-    Derived from the run seed and the episode index, and handed to every sampling
-    step as an explicit ``random.Random`` instance rather than the global
-    ``random`` module. Two properties follow:
-
-    - the output depends only on (seed, episode parameters), not on how many
-      ``random`` calls anything else in the process made first;
-    - an episode's descriptions do not depend on how many episodes were
-      generated before it.
-
-    Seeding a ``str`` is deterministic across processes, unlike ``hash()``.
-    """
-    return random.Random(f"{seed}:{episode_index}")
-
-
-def generate_episode_descriptions(
-    task_name: str,
-    episodes: List[Dict[str, str]],
-    max_descriptions: int = 1000000,
-    seed=None,
-):
+def generate_episode_descriptions(task_name: str, episodes: List[Dict[str, str]], max_descriptions: int = 1000000):
     """
     Generate descriptions for episodes by replacing placeholders in instructions with parameter values.
     For each episode, filter instructions that have matching placeholders and generate up to
     max_descriptions by replacing placeholders with parameter values.
     Now also generates unseen descriptions.
-
-    Pass ``seed`` to make the result a function of the episode seed and parameters
-    alone; without it, generation keeps drawing from the global ``random`` module.
     """
     # Load task instructions
     task_data = load_task_instructions(task_name)
@@ -232,11 +229,9 @@ def generate_episode_descriptions(
 
     # Process each episode
     for i, episode in enumerate(episodes):
-        rng = random if seed is None else episode_rng(seed, i)
-
         # Filter instructions that have all placeholders matching episode parameters
-        filtered_seen_instructions = filter_instructions(seen_instructions, episode, rng)
-        filtered_unseen_instructions = filter_instructions(unseen_instructions, episode, rng)
+        filtered_seen_instructions = filter_instructions(seen_instructions, episode)
+        filtered_unseen_instructions = filter_instructions(unseen_instructions, episode)
 
         if filtered_seen_instructions == [] and filtered_unseen_instructions == []:
             print(f"Episode {i}: No valid instructions found")
@@ -251,7 +246,7 @@ def generate_episode_descriptions(
                 if len(seen_episode_descriptions) >= max_descriptions:
                     flag_seen = False
                     break
-                description = replace_placeholders(instruction, episode, rng)
+                description = replace_placeholders(instruction, episode)
                 seen_episode_descriptions.append(description)
 
         # Generate unseen descriptions by replacing placeholders
@@ -262,7 +257,7 @@ def generate_episode_descriptions(
                 if len(unseen_episode_descriptions) >= max_descriptions:
                     flag_unseen = False
                     break
-                description = replace_placeholders_unseen(instruction, episode, rng)
+                description = replace_placeholders_unseen(instruction, episode)
                 unseen_episode_descriptions.append(description)
 
         all_generated_descriptions.append({
@@ -292,18 +287,9 @@ if __name__ == "__main__":
         default=100,
         help="Maximum number of descriptions per episode",
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Seed for instruction generation. Pass it to make repeated runs of the "
-        "same input produce the same descriptions (see issue #505).",
-    )
 
     args = parser.parse_args()
-    setting_file = os.path.join(
-        parent_directory, f"../../env_cfg/task_config/{args.setting}.yml"
-    )
+    setting_file = resolve_setting_path(args.setting)
     with open(setting_file, "r", encoding="utf-8") as f:
         args_dict = yaml.load(f.read(), Loader=yaml.FullLoader)
 
@@ -312,7 +298,7 @@ if __name__ == "__main__":
     episodes = extract_episodes_from_scene_info(scene_info)
 
     # Generate descriptions
-    results = generate_episode_descriptions(args.task_name, episodes, args.max_num, seed=args.seed)
+    results = generate_episode_descriptions(args.task_name, episodes, args.max_num)
 
     # Save results to output files
     save_episode_descriptions(args.task_name, args.setting, results)

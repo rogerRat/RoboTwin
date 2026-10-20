@@ -1,7 +1,7 @@
 from ._base_task import Base_Task
-from .model_utils import get_available_model_ids
 from .utils import *
 import sapien
+import glob
 
 
 class put_object_cabinet(Base_Task):
@@ -39,6 +39,19 @@ class put_object_cabinet(Base_Task):
                 rotate_lim=[0, np.pi / 3, 0],
             )
 
+        def get_available_model_ids(modelname):
+            asset_path = os.path.join("assets/objects", modelname)
+            json_files = glob.glob(os.path.join(asset_path, "model_data*.json"))
+            available_ids = []
+            for file in json_files:
+                base = os.path.basename(file)
+                try:
+                    idx = int(base.replace("model_data", "").replace(".json", ""))
+                    available_ids.append(idx)
+                except ValueError:
+                    continue
+            return available_ids
+
         object_list = [
             "047_mouse",
             "048_stapler",
@@ -67,8 +80,6 @@ class put_object_cabinet(Base_Task):
         self.add_prohibit_area(self.object, padding=0.01)
         self.add_prohibit_area(self.cabinet, padding=0.01)
         self.prohibited_area.append([-0.15, -0.3, 0.15, 0.3])
-        self.arm_tag = ArmTag("right" if self.object.get_pose().p[0] > 0 else "left")
-        self.origin_z = self.object.get_pose().p[2]
 
     def play_once(self):
         arm_tag = ArmTag("right" if self.object.get_pose().p[0] > 0 else "left")

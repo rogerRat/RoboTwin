@@ -1,6 +1,5 @@
 import os
 import re
-import shutil
 import sapien.core as sapien
 from sapien.render import clear_cache as sapien_clear_cache
 from sapien.utils.viewer import Viewer
@@ -215,7 +214,15 @@ class Base_Task(gym.Env):
         sapien.render.set_camera_shader_dir("rt")
         sapien.render.set_ray_tracing_samples_per_pixel(32)
         sapien.render.set_ray_tracing_path_depth(8)
-        sapien.render.set_ray_tracing_denoiser("oidn")
+        # Manual denoiser switch: OIDN is on by default for parity with all
+        # historical batches; set ROBOTWIN_RT_DENOISER=none to collect/evaluate
+        # on raw noisy ray-traced frames (SAPIEN Literal['none','oidn','optix']).
+        rt_denoiser = os.environ.get("ROBOTWIN_RT_DENOISER", "oidn").strip().lower()
+        if rt_denoiser not in ("oidn", "optix", "none"):
+            raise ValueError(
+                f"ROBOTWIN_RT_DENOISER must be one of 'oidn', 'optix', 'none', got {rt_denoiser!r}"
+            )
+        sapien.render.set_ray_tracing_denoiser(rt_denoiser)
 
         # declare sapien scene
         scene_config = sapien.SceneConfig()
@@ -318,10 +325,10 @@ class Base_Task(gym.Env):
     def get_cluttered_table(self, cluttered_numbers=10, xlim=[-0.59, 0.59], ylim=[-0.34, 0.34], zlim=[0.741]):
         self.record_cluttered_objects = []  # record cluttered objects
 
-        # Rebind instead of mutating: the defaults are shared across calls, so
-        # in-place updates would accumulate the table offset (see #288).
-        xlim = [xlim[0] + self.table_xy_bias[0], xlim[1] + self.table_xy_bias[0]]
-        ylim = [ylim[0] + self.table_xy_bias[1], ylim[1] + self.table_xy_bias[1]]
+        xlim[0] += self.table_xy_bias[0]
+        xlim[1] += self.table_xy_bias[0]
+        ylim[0] += self.table_xy_bias[1]
+        ylim[1] += self.table_xy_bias[1]
 
         if np.random.rand() < self.clean_background_rate:
             return
@@ -455,6 +462,11 @@ class Base_Task(gym.Env):
         if self.data_type.get("third_view", False):
             third_view_rgb = self.cameras.get_observer_rgb()
             pkl_dic["third_view_rgb"] = third_view_rgb
+        if os.environ.get("EMIX_INSTANCE_ANNOTATIONS") == "1":
+            instance_ids = self.cameras.get_instance_ids()
+            for camera_name, payload in instance_ids.items():
+                pkl_dic["observation"][camera_name].update(payload)
+
         # mesh_segmentation
         if self.data_type.get("mesh_segmentation", False):
             mesh_segmentation = self.cameras.get_segmentation(level="mesh")
@@ -525,70 +537,26 @@ class Base_Task(gym.Env):
         save_pkl(self.folder_path["cache"] + f"{self.FRAME_IDX}.pkl", pkl_dic)  # use cache
         self.FRAME_IDX += 1
 
-    # Bound applied to a joint whose URDF limit is a placeholder: curobo plans
-    # in unwrapped joint space, so on such a joint any planned value past ±π is
-    # a wrap of a reachable pose, not a distinct pose.
-    _JOINT_WRAP_LIMIT = math.pi
-    # A URDF limit at or beyond ±2π constrains nothing a wrap check cares about
-    # and is treated as a placeholder (aloha-agilex and ARX-X5 write ±10 rad).
-    _JOINT_LIMIT_PLACEHOLDER = 2 * math.pi
-
-    @classmethod
-    def _arm_joint_bounds(cls, arm_joints):
-        """Per-joint (lower, upper) legality bounds, ordered like the columns of
-        a planned path's ``position`` array. A credible URDF limit is used as is
-        — franka's joint6 legally reaches 3.752 rad — while a placeholder limit
-        falls back to ±π to catch unwrapped plans."""
-        bounds = []
-        for joint in arm_joints:
-            limits = np.asarray(joint.get_limits(), dtype=np.float64).reshape(-1)
-            lower, upper = float(limits[0]), float(limits[1])
-            if not (lower >= -cls._JOINT_LIMIT_PLACEHOLDER):  # False for -inf/nan
-                lower = -cls._JOINT_WRAP_LIMIT
-            if not (upper <= cls._JOINT_LIMIT_PLACEHOLDER):
-                upper = cls._JOINT_WRAP_LIMIT
-            bounds.append((lower, upper))
-        return np.asarray(bounds, dtype=np.float64)
-
-    @classmethod
-    def _joint_path_excess(cls, joint_path, bounds):
-        """The farthest any planned waypoint strays outside its joint's bounds,
-        in radians; 0.0 when every waypoint is legal."""
-        excess = 0.0
-        for item in joint_path or []:
-            if not isinstance(item, dict):
-                continue
-            position = item.get("position")
-            if position is None:
-                continue
-            values = np.asarray(position, dtype=np.float64)
-            if values.size == 0:
-                continue
-            values = values.reshape(-1, values.shape[-1])
-            if len(bounds) and values.shape[1] == len(bounds):
-                over = np.maximum(bounds[:, 0] - values, values - bounds[:, 1])
-            else:
-                # Unknown column layout; fall back to the wrap bound everywhere.
-                over = np.abs(values) - cls._JOINT_WRAP_LIMIT
-            excess = max(excess, float(over.max()))
-        return excess
-
-    def planned_joints_legal(self):
-        """Planned arm joints must stay inside each joint's legal range: the
-        URDF limit where it is a real hardware bound, ±π where the URDF leaves
-        the joint effectively unbounded and a larger value can only be curobo
-        planning an unwrapped wrap (place_dual_shoes reached -7.18 rad)."""
-        excess = max(
-            self._joint_path_excess(
-                self.left_joint_path,
-                self._arm_joint_bounds(self.robot.left_arm_joints),
-            ),
-            self._joint_path_excess(
-                self.right_joint_path,
-                self._arm_joint_bounds(self.robot.right_arm_joints),
-            ),
-        )
-        return excess <= 0.0, excess
+    def get_instance_object_map(self):
+        """Return an explicit renderer actor-ID to logical-role mapping."""
+        actors = self.scene.get_all_actors()
+        target = self.patch_target_actor() if hasattr(self, "patch_target_actor") else None
+        target_entity = getattr(target, "actor", target)
+        target_id = int(target_entity.per_scene_id) if target_entity is not None else None
+        mapping = {}
+        for actor in actors:
+            actor_id = int(actor.per_scene_id)
+            name = str(actor.get_name() or "actor")
+            mapping[str(actor_id)] = "patch_target" if actor_id == target_id else f"scene_{name}_{actor_id}"
+        for articulation in self.scene.get_all_articulations():
+            for link in articulation.get_links():
+                link_entity = link.entity
+                actor_id = int(link_entity.per_scene_id)
+                name = str(link_entity.get_name() or "link")
+                mapping.setdefault(str(actor_id), f"scene_{name}_{actor_id}")
+        if target is None or not any(name == "patch_target" for name in mapping.values()):
+            raise ValueError("Task must register one visible patch_target actor")
+        return mapping
 
     def save_traj_data(self, idx):
         file_path = os.path.join(self.save_dir, "_traj_data", f"episode{idx}.pkl")
@@ -605,23 +573,16 @@ class Base_Task(gym.Env):
             traj_data = pickle.load(f)
         return traj_data
 
-    def merge_pkl_to_hdf5_video(self, instructions=None):
+    def merge_pkl_to_hdf5_video(self):
         if not self.save_data:
             return
         cache_path = self.folder_path["cache"]
-        episode_name = f"episode_{self.ep_num:07d}"
-        target_file_path = f"{self.save_dir}/data/{episode_name}.hdf5"
-        target_video_path = f"{self.save_dir}/video/{episode_name}.mp4"
+        target_file_path = f"{self.save_dir}/data/episode{self.ep_num}.hdf5"
+        target_video_path = f"{self.save_dir}/video/episode{self.ep_num}.mp4"
         # print('Merging pkl to hdf5: ', cache_path, ' -> ', target_file_path)
 
         os.makedirs(f"{self.save_dir}/data", exist_ok=True)
-        process_folder_to_hdf5_video(
-            cache_path,
-            target_file_path,
-            target_video_path,
-            instructions=instructions,
-            frequency=int(self.save_freq or 15),
-        )
+        process_folder_to_hdf5_video(cache_path, target_file_path, target_video_path)
 
     def remove_data_cache(self):
         folder_path = self.folder_path["cache"]

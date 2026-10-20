@@ -8,8 +8,8 @@ ROOT_PATH = ROOT_PATH[:ROOT_PATH.rfind("/") + 1]
 ASSETS_PATH = os.path.join(ROOT_PATH, "assets/")
 EMBODIMENTS_PATH = os.path.join(ASSETS_PATH, "embodiments/")
 TEXTURES_PATH = os.path.join(ASSETS_PATH, "background_texture/")
-CONFIGS_PATH = os.path.join(ROOT_PATH, "env_cfg/task_config/")
-SCRIPT_PATH = os.path.join(ROOT_PATH, "scripts/")
+CONFIGS_PATH = os.path.join(ROOT_PATH, "task_config/")
+SCRIPT_PATH = os.path.join(ROOT_PATH, "script/")
 DESCRIPTION_PATH = os.path.join(ROOT_PATH, "description/")
 
 # Euler angles in world coordinates
@@ -38,3 +38,61 @@ WORLD_DIRECTION_DIC = {
 }
 
 ROTATE_NUM = 10
+
+
+def is_left_task(task_name: str) -> bool:
+    """Whether the task's env module lives under envs/left/.
+
+    Left-arm task families (and their camera variants) are kept in the
+    ``envs/left/`` namespace so they stay separate from the original right-arm
+    tasks.  CLI task names are bare (e.g. ``blocks_ranking_rgb_left``); this
+    helper maps that bare name to the ``left`` namespace by file existence.
+    """
+    left_root = os.path.join(ROOT_PATH, "envs", "left")
+    # The leading "" keeps standalone (non-wrapper) tasks such as
+    # place_object_scale_left resolvable directly under envs/left/.
+    return any(os.path.exists(os.path.join(left_root, folder, f"{task_name}.py"))
+               for folder in ("", "base", "impl", "central_wide_cam", "left_oppo_cam",
+                              "cen_arm_right_wide_cam", "cen_arm_near_side_cam",
+                              "cen_arm_side_cam", "cen_arm_front_cam", "cen_arm_top_cam"))
+
+
+def import_task_env(task_name: str):
+    """Import and return the env module for a task, resolving envs/left/ first.
+
+    Falls back to ``envs.{task_name}`` for original (non-left) tasks so a
+    single bare task name works for both namespaces.
+    """
+    import importlib
+    if is_left_task(task_name):
+        left_root = os.path.join(ROOT_PATH, "envs", "left")
+        for folder in ("cen_arm_right_wide_cam", "cen_arm_near_side_cam",
+                       "cen_arm_side_cam", "cen_arm_front_cam", "cen_arm_top_cam",
+                       "central_wide_cam", "left_oppo_cam",
+                       "base", "impl"):
+            if os.path.exists(os.path.join(left_root, folder, f"{task_name}.py")):
+                return importlib.import_module(f"envs.left.{folder}.{task_name}")
+        return importlib.import_module(f"envs.left.{task_name}")
+    return importlib.import_module(f"envs.{task_name}")
+
+
+def task_config_yml_path(task_config: str) -> str:
+    """Path to the existing task config yml, preferring task_config/left/.
+
+    Left-arm task configs are organized like ``envs/left`` — one subfolder per
+    camera variant (``base`` holds the default central-cam configs, and utility
+    tasks like ``place_object_scale_left`` sit at the left/ root) — while
+    original configs stay in ``task_config/``.  The bare config name is
+    resolved against every candidate and the first existing file wins, so the
+    CLI argument is unchanged.  Keep the folder list in sync with
+    ``import_task_env``.
+    """
+    left_root = os.path.join(ROOT_PATH, "task_config", "left")
+    for folder in ("cen_arm_right_wide_cam", "cen_arm_near_side_cam",
+                   "cen_arm_side_cam", "cen_arm_front_cam", "cen_arm_top_cam",
+                   "central_wide_cam", "left_oppo_cam",
+                   "base", ""):
+        p = os.path.join(left_root, folder, f"{task_config}.yml")
+        if os.path.exists(p):
+            return p
+    return os.path.join(ROOT_PATH, "task_config", f"{task_config}.yml")

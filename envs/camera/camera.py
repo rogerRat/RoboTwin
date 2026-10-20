@@ -373,6 +373,17 @@ class Camera:
 
         return _get_rgb(self.observer_camera)
 
+    def get_instance_ids(self) -> dict:
+        """Return raw actor IDs from the current camera buffers without colorization."""
+        result = {}
+        for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if camera_name == "head_camera" and self.collect_head_camera:
+                segmentation = np.asarray(camera.get_picture("Segmentation"))
+                if segmentation.ndim != 3 or segmentation.shape[-1] < 2:
+                    raise ValueError("Expected a SAPIEN Segmentation buffer with actor IDs in channel 1")
+                result[camera_name] = {"instance_id": segmentation[..., 1].copy()}
+        return result
+
     # Get Camera Segmentation
     def get_segmentation(self, level="mesh") -> dict:
 
